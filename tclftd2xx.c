@@ -4,7 +4,7 @@
  *
  * ----------------------------------------------------------------------
  *	See the accompanying file 'licence.terms' for the software license.
- *	In essence - this is MIT licencensed code.
+ *	In essence - this is MIT licensed code.
  * ----------------------------------------------------------------------
  */
 
@@ -34,6 +34,7 @@ typedef struct Channel {
     unsigned long rxtimeout;
     unsigned long txtimeout;
     FT_HANDLE handle;
+    HANDLE event;
 } Channel;
 
 typedef struct ChannelEvent {
@@ -44,6 +45,7 @@ typedef struct ChannelEvent {
 
 typedef struct Package {
     struct Channel *headPtr;
+    unsigned long count;
     unsigned long uid;
 } Package;
 
@@ -76,6 +78,14 @@ static Tcl_ChannelType Ftd2xxChannelType = {
     NULL /*ChannelWideSeek*/
 };
 
+/**
+ * Close the channel and clean up all allocated resources. This requires
+ * removing the channel from the linked list (hence we need some way to
+ * access the head of the list which is in the Package structure).
+ * This function is called either from an explicit 'close' call from script
+ * or when the interpreter is deleted.
+ */
+
 static int
 ChannelClose(ClientData instance, Tcl_Interp *interp)
 {
@@ -86,10 +96,15 @@ ChannelClose(ClientData instance, Tcl_Interp *interp)
     FT_STATUS fts;
 
     OutputDebugString("ChannelClose\n");
-    fts = FT_Purge(instPtr->handle, FT_PURGE_RX | FT_PURGE_TX);
+    CloseHandle(instPtr->event);
+    if ((fts = FT_Purge(instPtr->handle, FT_PURGE_RX | FT_PURGE_TX)) != FT_OK) {
+	OutputDebugString("ChannelClose error: ");
+	OutputDebugString(ConvertError(fts));
+    }
     fts = FT_Close(instPtr->handle);
     if (fts != FT_OK) {
-	Tcl_AppendResult(interp, "error closing device: ",
+	Tcl_AppendResult(interp, "error closing \"",
+			 Tcl_GetChannelName(instPtr->channel), "\": ",
 			 ConvertError(fts), NULL);
 	r = TCL_ERROR;
     }
@@ -99,10 +114,18 @@ ChannelClose(ClientData instance, Tcl_Interp *interp)
 	tmpPtrPtr = &(*tmpPtrPtr)->nextPtr;
     }
     *tmpPtrPtr = instPtr->nextPtr;
-
+    --pkgPtr->count;
     ckfree((char *)instPtr);
     return r;
 }
+
+/**
+ * Read data from the device. We support non-blocking reads by checking the 
+ * amount available in the receive queue. Note that the FTD2XX devices implement
+ * a read timeout (which we may set via fconfigure) and the blocking read will
+ * terminate when the timeout triggers anyway.
+ * If the device is disconnected then we will get a read error.
+ */
 
 static int
 ChannelInput(ClientData instance, char *buffer, int toRead, int *errorCodePtr)
@@ -125,26 +148,50 @@ ChannelInput(ClientData instance, char *buffer, int toRead, int *errorCodePtr)
 	}
     }
     if (FT_Read(instPtr->handle, buffer, toRead, &cbRead) != FT_OK) {
+	OutputDebugString("ChannelInput error: ");
 	OutputDebugString(ConvertError(fts));
-	*errorCodePtr = EINVAL;
+	switch (fts) {
+	    case FT_DEVICE_NOT_FOUND: *errorCodePtr = ENODEV; break;
+	    default: *errorCodePtr = EINVAL; break;
+	}
+	cbRead = -1;
     }
     return (int)cbRead;
 }
+
+/**
+ * Write to the device. We don't have any non-blocking handling for write as it
+ * isnt obvious how to do this. However the devices implement a write timeout 
+ * which likely cause us to return and retry.
+ * If the device is disconnected we will get an error.
+ */
 
 static int
 ChannelOutput(ClientData instance, const char *buffer, int toWrite, int *errorCodePtr)
 {
     Channel *instPtr = instance;
+    FT_STATUS fts = FT_OK;
     char sz[80];
     DWORD cbWrote = 0;
     DWORD dwStart = GetTickCount();
-    if (FT_Write(instPtr->handle, (void *)buffer, toWrite, &cbWrote) != FT_OK) {
-	*errorCodePtr = EINVAL;
+    if ((fts = FT_Write(instPtr->handle, (void *)buffer, toWrite, &cbWrote)) != FT_OK) {
+	OutputDebugString("ChannelOutput error: ");
+	OutputDebugString(ConvertError(fts));
+	switch (fts) {
+	    case FT_DEVICE_NOT_FOUND: *errorCodePtr = ENODEV; break;
+	    default: *errorCodePtr = EINVAL; break;
+	}
+	cbWrote = -1;
     }
-    sprintf(sz, "ChannelOutput %ld ms\n", GetTickCount()-dwStart);
+    sprintf(sz, "ChannelOutput %lu bytes in %ld ms\n", cbWrote, GetTickCount()-dwStart);
     OutputDebugString(sz);
     return (int)cbWrote;
 }
+
+/**
+ * Implement device control via the Tcl 'fconfigure' command.
+ * We can change the timeouts and the latency timer here.
+ */
 
 static int
 ChannelSetOption(ClientData instance, Tcl_Interp *interp,
@@ -188,6 +235,12 @@ ChannelSetOption(ClientData instance, Tcl_Interp *interp,
 
     return TCL_OK;
 }
+
+/**
+ * Read the additional channel settings. The timeout values cannot be
+ * read from the device so we maintain the values in the channel instance
+ * data. The latency can be read back.
+ */
 
 static int
 ChannelGetOption(ClientData instance, Tcl_Interp *interp, 
@@ -252,6 +305,15 @@ ChannelGetOption(ClientData instance, Tcl_Interp *interp,
     return r;
 }
 
+/**
+ * This function is called by Tcl to setup fileevent notifications
+ * on this channel. We only really support readable events (our channel
+ * type is basically always writable).
+ * Our channel state monitoring is actually done via the notifier. All
+ * that occurs here is to reduce the blocking time if our channel has
+ * readable events configured.
+ */
+
 static void
 ChannelWatch(ClientData instance, int mask)
 {
@@ -267,6 +329,10 @@ ChannelWatch(ClientData instance, int mask)
     }
 }
 
+/**
+ * Provide access to the underlying device handle.
+ */
+
 static int
 ChannelGetHandle(ClientData instance, int direction, ClientData *handlePtr)
 {
@@ -275,6 +341,10 @@ ChannelGetHandle(ClientData instance, int direction, ClientData *handlePtr)
     *handlePtr = instPtr->handle;
     return TCL_OK;
 }
+
+/**
+ * Control the blocking mode.
+ */
 
 static int
 ChannelBlockMode(ClientData instance, int mode)
@@ -288,6 +358,12 @@ ChannelBlockMode(ClientData instance, int mode)
     }
     return TCL_OK;
 }
+
+/**
+ * If a fileevent has occured on a channel then we end up in this event handler
+ * function. We now notify the channel that an event is available. We also
+ * remove the pending flag to permit more events to be raised as needed.
+ */
 
 static int
 EventProc(Tcl_Event *evPtr, int flags)
@@ -306,6 +382,13 @@ EventProc(Tcl_Event *evPtr, int flags)
     Tcl_NotifyChannel(chanPtr->channel, chanPtr->watchmask & eventPtr->flags);
     return 1;
 }
+
+/**
+ * This function is called to setup the notifier to monitor our
+ * channel for file events. Our CheckProc will be called anyway after some
+ * interval so we really only need to ensure that it is called at some 
+ * appropriate interval.
+ */
 
 static void
 SetupProc(ClientData clientData, int flags)
@@ -327,6 +410,18 @@ SetupProc(ClientData clientData, int flags)
     Tcl_SetMaxBlockTime(&blockTime);
 }
 
+/**
+ * To support fileevents we have to check for any new data arriving. This
+ * is done by polling the device at intervals. To avoid making calls to the
+ * device we can use a Win32 event handle which will be signalled when
+ * the device has data for us. When this occurs we raise a Tcl event
+ * for this channel and queue it.
+ * An alternative method would be to have a secondary thread wait on all the
+ * event handles for all our channels. That would improve the latency at a
+ * cost to code simplicity and maintainability. However a second thread might
+ * help with non-blocking writes too so should be considered at some point.
+ */
+
 static void
 CheckProc(ClientData clientData, int flags)
 {
@@ -341,6 +436,7 @@ CheckProc(ClientData clientData, int flags)
 	DWORD rx = 0, tx = 0, ev = 0;
 	FT_STATUS fts = FT_OK;
 
+	/* already has an event queued so move on */
 	if (chanPtr->flags & FTD2XX_PENDING) {
 	    continue;
 	}
@@ -350,24 +446,31 @@ CheckProc(ClientData clientData, int flags)
 	    continue;
 	}
 
-	if ((fts = FT_GetStatus(chanPtr->handle, &rx, &tx, &ev)) == FT_OK) {
-	    if (rx != 0 || tx != 0 || ev != 0) {
-		int mask = 0;
-
-		mask = TCL_WRITABLE | ((rx)?TCL_READABLE:0);
-		//if (ev != 0) evPtr->flags |= TCL_EXCEPTION;
-		if (chanPtr->watchmask & mask) {
-		    ChannelEvent *evPtr = (ChannelEvent *)ckalloc(sizeof(ChannelEvent));
-		    chanPtr->flags |= FTD2XX_PENDING;
-		    evPtr->header.proc = EventProc;
-		    evPtr->instPtr = chanPtr;
-		    evPtr->flags = mask;
-		    Tcl_QueueEvent((Tcl_Event *)evPtr, TCL_QUEUE_TAIL);
+	if (WaitForSingleObject(chanPtr->event, 0) == WAIT_OBJECT_0) {
+	    if ((fts = FT_GetStatus(chanPtr->handle, &rx, &tx, &ev)) == FT_OK) {
+		if (rx != 0 || tx != 0 || ev != 0) {
+		    int mask = 0;
+		    
+		    mask = TCL_WRITABLE | ((rx) ? TCL_READABLE : 0);
+		    //if (ev != 0) evPtr->flags |= TCL_EXCEPTION;
+		    if (chanPtr->watchmask & mask) {
+			ChannelEvent *evPtr = 
+			    (ChannelEvent *)ckalloc(sizeof(ChannelEvent));
+			chanPtr->flags |= FTD2XX_PENDING;
+			evPtr->header.proc = EventProc;
+			evPtr->instPtr = chanPtr;
+			evPtr->flags = mask;
+			Tcl_QueueEvent((Tcl_Event *)evPtr, TCL_QUEUE_TAIL);
+		    }
 		}
 	    }
 	}
     }
 }
+
+/**
+ * Called to remove the event source when the interpreter exits.
+ */
 
 static void
 DeleteProc(ClientData clientData)
@@ -377,6 +480,10 @@ DeleteProc(ClientData clientData)
     Tcl_DeleteEventSource(SetupProc, CheckProc, pkgPtr);
     ckfree((char *)pkgPtr);
 }
+
+/**
+ * Convert FTD2XX status errors into strings.
+ */
 
 static const char *
 ConvertError(FT_STATUS fts)
@@ -402,6 +509,13 @@ ConvertError(FT_STATUS fts)
     return s;
 }
 
+/**
+ * Open a named device and create a Tcl channel to represent the open device
+ * and to enable communications with Tcl programs. By default these channels
+ * are configured to be binary and to have 500ms timeouts but all these can
+ * be configured at runtime using the 'fconfigure' command.
+ */
+
 static int
 OpenCmd(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[])
 {
@@ -409,6 +523,7 @@ OpenCmd(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *const objv
     const char *name = NULL;
     FT_HANDLE handle = 0;
     FT_STATUS fts = FT_OK;
+    HANDLE hEvent = INVALID_HANDLE_VALUE;
     int r = TCL_OK, index, nameindex = 2, ftmode = FT_OPEN_BY_SERIAL_NUMBER;
     const unsigned long rxtimeout = 500, txtimeout = 500;
     enum {OPT_SERIAL, OPT_DESC, OPT_LOC};
@@ -440,6 +555,12 @@ OpenCmd(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *const objv
     if (fts == FT_OK)
 	fts = FT_SetTimeouts(handle, rxtimeout, txtimeout);
     if (fts == FT_OK) {
+	hEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
+        fts = FT_SetEventNotification(handle, FT_EVENT_RXCHAR, hEvent);
+	if (fts != FT_OK)
+	    CloseHandle(hEvent);
+    }
+    if (fts == FT_OK) {
         Channel *instPtr;
         char name[6+TCL_INTEGER_SPACE];
 
@@ -451,6 +572,7 @@ OpenCmd(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *const objv
 	instPtr->rxtimeout = rxtimeout;
 	instPtr->txtimeout = txtimeout;
         instPtr->handle = handle;
+	instPtr->event = hEvent;
         instPtr->channel = Tcl_CreateChannel(&Ftd2xxChannelType, name,
 					     instPtr, instPtr->validmask);
 	Tcl_SetChannelOption(interp, instPtr->channel, "-encoding", "binary");
@@ -461,16 +583,21 @@ OpenCmd(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *const objv
 	instPtr->pkgPtr = pkgPtr;
 	instPtr->nextPtr = pkgPtr->headPtr;
 	pkgPtr->headPtr = instPtr;
+	++pkgPtr->count;
 
         Tcl_SetObjResult(interp, Tcl_NewStringObj(name, -1));
         r = TCL_OK;
     } else {
-        Tcl_AppendResult(interp, "failed to open device: \"",
+        Tcl_AppendResult(interp, "failed create device channel: \"",
 			 name, "\": ", ConvertError(fts), NULL);
         r = TCL_ERROR;
     }
     return r;
 }
+
+/**
+ * Purge the device transmit and receive buffers.
+ */
 
 static int
 PurgeCmd(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[])
@@ -503,6 +630,11 @@ PurgeCmd(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *const obj
     return TCL_OK;
 }
 
+/**
+ * Reset the device. This requires an open channel as a means of identifying the
+ * device to reset.
+ */
+
 static int
 ResetCmd(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[])
 {
@@ -533,6 +665,15 @@ ResetCmd(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *const obj
 
     return TCL_OK;
 }
+
+/**
+ * The implementation of the 'ftd2xx list' command. This function builds a list
+ * of all the available D2XX compatible devices connected. Each list element
+ * is a list of value-name pairs suitable for use with 'array set' or 'dict create'
+ * that return the various bits of information provided by the D2XX device info
+ * structure. Of note are the serial number and device description which may be
+ * required when opening the device.
+ */
 
 static int
 ListCmd(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[])
@@ -629,6 +770,10 @@ EnsembleCmd(ClientData clientData, Tcl_Interp *interp,
     return TCL_ERROR;
 }
 
+/**
+ * Package initialization function.
+ */
+
 int DLLEXPORT
 Ftd2xx_Init(Tcl_Interp *interp)
 {
@@ -642,6 +787,7 @@ Ftd2xx_Init(Tcl_Interp *interp)
 
     pkgPtr = (Package *)ckalloc(sizeof(Package));
     pkgPtr->headPtr = NULL;
+    pkgPtr->count = 0;
     pkgPtr->uid = 0;
     Tcl_CreateEventSource(SetupProc, CheckProc, pkgPtr);
     Tcl_CreateObjCommand(interp, "ftd2xx", EnsembleCmd, pkgPtr, DeleteProc);
