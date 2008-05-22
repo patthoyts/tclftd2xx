@@ -15,9 +15,38 @@
 #include <errno.h>
 #include "ftd2xx.h"
 
-#if _MSC_VER >= 1000
-#pragma comment(lib, "ftd2xx.lib")
-#endif
+typedef FT_STATUS (WINAPI FT_CloseProc)(FT_HANDLE);
+typedef FT_STATUS (WINAPI FT_CreateDeviceInfoListProc)(LPDWORD);
+typedef FT_STATUS (WINAPI FT_GetDeviceInfoListProc)
+    (FT_DEVICE_LIST_INFO_NODE*,LPDWORD);
+typedef FT_STATUS (WINAPI FT_GetLatencyTimerProc)(FT_HANDLE,PUCHAR);
+typedef FT_STATUS (WINAPI FT_GetStatusProc)(FT_HANDLE,LPDWORD,LPDWORD,LPDWORD);
+typedef FT_STATUS (WINAPI FT_OpenExProc)(PVOID,DWORD,FT_HANDLE*);
+typedef FT_STATUS (WINAPI FT_PurgeProc)(FT_HANDLE,ULONG);
+typedef FT_STATUS (WINAPI FT_ReadProc)(FT_HANDLE,LPVOID,DWORD,LPDWORD);
+typedef FT_STATUS (WINAPI FT_ResetPortProc)(FT_HANDLE);
+typedef FT_STATUS (WINAPI FT_SetEventNotificationProc)(FT_HANDLE,DWORD,PVOID);
+typedef FT_STATUS (WINAPI FT_SetLatencyTimerProc)(FT_HANDLE,UCHAR);
+typedef FT_STATUS (WINAPI FT_SetTimeoutsProc)(FT_HANDLE,ULONG,ULONG);
+typedef FT_STATUS (WINAPI FT_WriteProc)(FT_HANDLE,LPVOID,DWORD,LPDWORD);
+
+typedef struct FTDIPROCS {
+    FT_CloseProc *FT_Close;
+    FT_CreateDeviceInfoListProc *FT_CreateDeviceInfoList;
+    FT_GetDeviceInfoListProc *FT_GetDeviceInfoList;
+    FT_GetLatencyTimerProc *FT_GetLatencyTimer;
+    FT_GetStatusProc *FT_GetStatus;
+    FT_OpenExProc *FT_OpenEx;
+    FT_PurgeProc *FT_Purge;
+    FT_ReadProc *FT_Read;
+    FT_ResetPortProc *FT_ResetPort;
+    FT_SetEventNotificationProc *FT_SetEventNotification;
+    FT_SetLatencyTimerProc *FT_SetLatencyTimer;
+    FT_SetTimeoutsProc *FT_SetTimeouts;
+    FT_WriteProc *FT_Write;
+} FTDIPROCS;
+
+static FTDIPROCS procs;
 
 #define FTD2XX_ASYNC   (1<<1)
 #define FTD2XX_PENDING (1<<2)
@@ -47,6 +76,7 @@ typedef struct Package {
     struct Channel *headPtr;
     unsigned long count;
     unsigned long uid;
+    HMODULE hFtdi;
 } Package;
 
 static const char *ConvertError(FT_STATUS fts);
@@ -79,6 +109,28 @@ static Tcl_ChannelType Ftd2xxChannelType = {
 };
 
 /**
+ * Debug tracing.
+ */
+
+#if defined(DEBUG) || defined(_DEBUG)
+#define TRACE LocalTrace
+#else
+#define TRACE 1 ? ((void)0) : LocalTrace
+#endif
+
+static void
+LocalTrace(const char *format, ...)
+{
+    va_list args;
+    static char buffer[1024];
+
+    va_start(args, format);
+    _vsnprintf(buffer, 1023, format, args);
+    OutputDebugStringA(buffer);
+    va_end(args);
+}
+
+/**
  * Close the channel and clean up all allocated resources. This requires
  * removing the channel from the linked list (hence we need some way to
  * access the head of the list which is in the Package structure).
@@ -95,13 +147,12 @@ ChannelClose(ClientData instance, Tcl_Interp *interp)
     int r = TCL_OK;
     FT_STATUS fts;
 
-    OutputDebugString("ChannelClose\n");
+    TRACE("ChannelClose\n");
     CloseHandle(instPtr->event);
-    if ((fts = FT_Purge(instPtr->handle, FT_PURGE_RX | FT_PURGE_TX)) != FT_OK) {
-	OutputDebugString("ChannelClose error: ");
-	OutputDebugString(ConvertError(fts));
+    if ((fts = procs.FT_Purge(instPtr->handle, FT_PURGE_RX | FT_PURGE_TX)) != FT_OK) {
+	TRACE("ChannelClose error: %s", ConvertError(fts));
     }
-    fts = FT_Close(instPtr->handle);
+    fts = procs.FT_Close(instPtr->handle);
     if (fts != FT_OK) {
 	Tcl_AppendResult(interp, "error closing \"",
 			 Tcl_GetChannelName(instPtr->channel), "\": ",
@@ -139,17 +190,16 @@ ChannelInput(ClientData instance, char *buffer, int toRead, int *errorCodePtr)
 	 * Non-blocking: only read data that is available
 	 */
 	DWORD rx = 0, tx = 0, ev = 0;
-	if ((fts = FT_GetStatus(instPtr->handle, &rx, &tx, &ev)) == FT_OK) {
+	if ((fts = procs.FT_GetStatus(instPtr->handle, &rx, &tx, &ev)) == FT_OK) {
 	    if ((int)rx < toRead) {
 		toRead = rx;
 	    }
 	} else {
-	    OutputDebugString(ConvertError(fts));
+	    TRACE(ConvertError(fts));
 	}
     }
-    if (FT_Read(instPtr->handle, buffer, toRead, &cbRead) != FT_OK) {
-	OutputDebugString("ChannelInput error: ");
-	OutputDebugString(ConvertError(fts));
+    if (procs.FT_Read(instPtr->handle, buffer, toRead, &cbRead) != FT_OK) {
+	TRACE("ChannelInput error: %s", ConvertError(fts));
 	switch (fts) {
 	    case FT_DEVICE_NOT_FOUND: *errorCodePtr = ENODEV; break;
 	    default: *errorCodePtr = EINVAL; break;
@@ -171,20 +221,17 @@ ChannelOutput(ClientData instance, const char *buffer, int toWrite, int *errorCo
 {
     Channel *instPtr = instance;
     FT_STATUS fts = FT_OK;
-    char sz[80];
     DWORD cbWrote = 0;
     DWORD dwStart = GetTickCount();
-    if ((fts = FT_Write(instPtr->handle, (void *)buffer, toWrite, &cbWrote)) != FT_OK) {
-	OutputDebugString("ChannelOutput error: ");
-	OutputDebugString(ConvertError(fts));
+    if ((fts = procs.FT_Write(instPtr->handle, (void *)buffer, toWrite, &cbWrote)) != FT_OK) {
+	TRACE("ChannelOutput error: %s", ConvertError(fts));
 	switch (fts) {
 	    case FT_DEVICE_NOT_FOUND: *errorCodePtr = ENODEV; break;
 	    default: *errorCodePtr = EINVAL; break;
 	}
 	cbWrote = -1;
     }
-    sprintf(sz, "ChannelOutput %lu bytes in %ld ms\n", cbWrote, GetTickCount()-dwStart);
-    OutputDebugString(sz);
+    TRACE("ChannelOutput %lu bytes in %ld ms\n", cbWrote, GetTickCount()-dwStart);
     return (int)cbWrote;
 }
 
@@ -205,7 +252,7 @@ ChannelSetOption(ClientData instance, Tcl_Interp *interp,
 	int tmp = 1;
 	r = Tcl_GetInt(interp, newValue, &tmp);
 	if (r == TCL_OK) {
-	    fts = FT_SetTimeouts(instPtr->handle, (DWORD)tmp, instPtr->txtimeout);
+	    fts = procs.FT_SetTimeouts(instPtr->handle, (DWORD)tmp, instPtr->txtimeout);
 	    if (fts == FT_OK) {
 		instPtr->rxtimeout = (unsigned long)tmp;
 	    }
@@ -214,7 +261,7 @@ ChannelSetOption(ClientData instance, Tcl_Interp *interp,
 	int tmp = 1;
 	r = Tcl_GetInt(interp, newValue, &tmp);
 	if (r == TCL_OK) {
-	    fts = FT_SetTimeouts(instPtr->handle, instPtr->rxtimeout, (DWORD)tmp);
+	    fts = procs.FT_SetTimeouts(instPtr->handle, instPtr->rxtimeout, (DWORD)tmp);
 	    if (fts == FT_OK) {
 		instPtr->txtimeout = (unsigned long)tmp;
 	    }
@@ -223,7 +270,7 @@ ChannelSetOption(ClientData instance, Tcl_Interp *interp,
 	int tmp = 1;
 	r = Tcl_GetInt(interp, newValue, &tmp);
 	if (r == TCL_OK) {
-	    fts = FT_SetLatencyTimer(instPtr->handle, (UCHAR)tmp);
+	    fts = procs.FT_SetLatencyTimer(instPtr->handle, (UCHAR)tmp);
 	}
     }
 
@@ -280,7 +327,7 @@ ChannelGetOption(ClientData instance, Tcl_Interp *interp,
 	} else if (!strcmp("-latency", optionName)) {
 	    UCHAR timer = 0;
 	    Tcl_DStringSetLength(&ds, TCL_INTEGER_SPACE);
-	    fts = FT_GetLatencyTimer(instPtr->handle, &timer);
+	    fts = procs.FT_GetLatencyTimer(instPtr->handle, &timer);
 	    if (fts == FT_OK) {
 		sprintf(Tcl_DStringValue(&ds), "%d", timer);
 	    } else {
@@ -319,10 +366,8 @@ ChannelWatch(ClientData instance, int mask)
 {
     Channel *instPtr = instance;
     Tcl_Time blockTime = {0, 10000}; /* 10 msec */
-    char sz[80];
-    sprintf(sz, "ChannelWatch %s 0x%08x\n",
-	    Tcl_GetChannelName(instPtr->channel), mask);
-    OutputDebugString(sz);
+    TRACE("ChannelWatch %s 0x%08x\n",
+	  Tcl_GetChannelName(instPtr->channel), mask);
     instPtr->watchmask = mask & instPtr->validmask;
     if (instPtr->watchmask) {
 	Tcl_SetMaxBlockTime(&blockTime);
@@ -337,7 +382,7 @@ static int
 ChannelGetHandle(ClientData instance, int direction, ClientData *handlePtr)
 {
     Channel *instPtr = instance;
-    OutputDebugString("ChannelGetHandle\n");
+    TRACE("ChannelGetHandle\n");
     *handlePtr = instPtr->handle;
     return TCL_OK;
 }
@@ -350,7 +395,7 @@ static int
 ChannelBlockMode(ClientData instance, int mode)
 {
     Channel *instPtr = instance;
-    OutputDebugString("ChannelBlockMode\n");
+    TRACE("ChannelBlockMode\n");
     if (mode == TCL_MODE_NONBLOCKING) {
 	instPtr->flags  |= FTD2XX_ASYNC;
     } else {
@@ -370,15 +415,13 @@ EventProc(Tcl_Event *evPtr, int flags)
 {
     ChannelEvent *eventPtr = (ChannelEvent *)evPtr;
     Channel *chanPtr = eventPtr->instPtr;
-    char sz[80];
 
     if (!(flags & TCL_FILE_EVENTS)) {
 	return 0;
     }
 
     chanPtr->flags &= ~FTD2XX_PENDING;
-    sprintf(sz, "EventProc mask 0x%08x\n", chanPtr->watchmask & eventPtr->flags);
-    OutputDebugString(sz);
+    TRACE("EventProc mask 0x%08x\n", chanPtr->watchmask & eventPtr->flags);
     Tcl_NotifyChannel(chanPtr->channel, chanPtr->watchmask & eventPtr->flags);
     return 1;
 }
@@ -447,7 +490,7 @@ CheckProc(ClientData clientData, int flags)
 	}
 
 	if (WaitForSingleObject(chanPtr->event, 0) == WAIT_OBJECT_0) {
-	    if ((fts = FT_GetStatus(chanPtr->handle, &rx, &tx, &ev)) == FT_OK) {
+	    if ((fts = procs.FT_GetStatus(chanPtr->handle, &rx, &tx, &ev)) == FT_OK) {
 		if (rx != 0 || tx != 0 || ev != 0) {
 		    int mask = 0;
 		    
@@ -476,8 +519,9 @@ static void
 DeleteProc(ClientData clientData)
 {
     Package *pkgPtr = clientData;
-    OutputDebugString("Deleted FTD2xx command\n");
+    TRACE("Deleted FTD2xx command\n");
     Tcl_DeleteEventSource(SetupProc, CheckProc, pkgPtr);
+    if (pkgPtr->hFtdi) FreeLibrary(pkgPtr->hFtdi);
     ckfree((char *)pkgPtr);
 }
 
@@ -551,12 +595,12 @@ OpenCmd(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *const objv
     }
     name = Tcl_GetString(objv[nameindex]);
 
-    fts = FT_OpenEx((void *)name, ftmode, &handle);
+    fts = procs.FT_OpenEx((void *)name, ftmode, &handle);
     if (fts == FT_OK)
-	fts = FT_SetTimeouts(handle, rxtimeout, txtimeout);
+	fts = procs.FT_SetTimeouts(handle, rxtimeout, txtimeout);
     if (fts == FT_OK) {
 	hEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
-        fts = FT_SetEventNotification(handle, FT_EVENT_RXCHAR, hEvent);
+        fts = procs.FT_SetEventNotification(handle, FT_EVENT_RXCHAR, hEvent);
 	if (fts != FT_OK)
 	    CloseHandle(hEvent);
     }
@@ -622,7 +666,7 @@ PurgeCmd(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *const obj
     }
 
     instPtr = (Channel *)Tcl_GetChannelInstanceData(channel);
-    if ((fts = FT_Purge(instPtr->handle, FT_PURGE_RX | FT_PURGE_TX)) != FT_OK) {
+    if ((fts = procs.FT_Purge(instPtr->handle, FT_PURGE_RX | FT_PURGE_TX)) != FT_OK) {
 	Tcl_AppendResult(interp, "error purging channel: ", ConvertError(fts), NULL);
 	return TCL_ERROR;
     }
@@ -658,7 +702,7 @@ ResetCmd(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *const obj
     }
 
     instPtr = (Channel *)Tcl_GetChannelInstanceData(channel);
-    if ((fts = FT_ResetPort(instPtr->handle)) != FT_OK) {
+    if ((fts = procs.FT_ResetPort(instPtr->handle)) != FT_OK) {
 	Tcl_AppendResult(interp, "error resetting channel: ", ConvertError(fts), NULL);
 	return TCL_ERROR;
     }
@@ -685,7 +729,7 @@ ListCmd(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *const objv
     const char *typeName;
     const char *typeNames[] = { "BM", "AM", "100AX", "UNKNOWN", "2232C", "232R"};
 
-    if ((fts = FT_CreateDeviceInfoList(&count)) != FT_OK) {
+    if ((fts = procs.FT_CreateDeviceInfoList(&count)) != FT_OK) {
 	Tcl_AppendResult(interp, "failed to enumerate devices: ",
 			 ConvertError(fts), NULL);
 	return TCL_ERROR;
@@ -694,7 +738,7 @@ ListCmd(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *const objv
     nodesPtr = (FT_DEVICE_LIST_INFO_NODE*)
 	ckalloc(sizeof(FT_DEVICE_LIST_INFO_NODE) * count);
     
-    if ((fts = FT_GetDeviceInfoList(nodesPtr, &count)) != FT_OK) {
+    if ((fts = procs.FT_GetDeviceInfoList(nodesPtr, &count)) != FT_OK) {
 	Tcl_AppendResult(interp, "failed to get device list: ",
 			 ConvertError(fts), NULL);
 	ckfree((char *)nodesPtr);
@@ -778,17 +822,55 @@ int DLLEXPORT
 Ftd2xx_Init(Tcl_Interp *interp)
 {
     Package *pkgPtr;
+    HMODULE hDll = NULL;
+#ifdef WIN64
+    LPCSTR szDllName = "FTD2XX64.dll";
+#else
+    LPCSTR szDllName = "FTD2XX.dll";
+#endif
 
 #ifdef USE_TCL_STUBS
-    if (Tcl_InitStubs(interp, "8.0", 0) == NULL) {
+    if (Tcl_InitStubs(interp, TCL_VERSION, 0) == NULL) {
         return TCL_ERROR;
     }
 #endif
+
+    hDll = LoadLibraryA(szDllName);
+    if (hDll == NULL) {
+	Tcl_SetResult(interp, "failed to load the FTDI library", TCL_STATIC);
+	Tcl_SetErrorCode(interp, "DLL_NOT_FOUND", szDllName, NULL);
+	return TCL_ERROR;
+    }
+
+#define LOADPROC(name) \
+    (0 == (procs.name = (name ## Proc *)GetProcAddress(hDll, #name) ))
+
+    if (LOADPROC(FT_Close)
+	|| LOADPROC(FT_CreateDeviceInfoList)
+	|| LOADPROC(FT_GetDeviceInfoList)
+	|| LOADPROC(FT_GetLatencyTimer)
+	|| LOADPROC(FT_GetStatus)
+	|| LOADPROC(FT_OpenEx)
+	|| LOADPROC(FT_Purge)
+	|| LOADPROC(FT_Read)
+	|| LOADPROC(FT_ResetPort)
+	|| LOADPROC(FT_SetEventNotification)
+	|| LOADPROC(FT_SetLatencyTimer)
+	|| LOADPROC(FT_SetTimeouts)
+	|| LOADPROC(FT_Write) )
+    {
+	Tcl_SetResult(interp, "invalid ftd2xx.dll library!", TCL_STATIC);
+	Tcl_SetErrorCode(interp, "DLL_INVALID", szDllName, NULL);
+	FreeLibrary(hDll);
+	return TCL_ERROR;
+    }
+#undef LOADPROC
 
     pkgPtr = (Package *)ckalloc(sizeof(Package));
     pkgPtr->headPtr = NULL;
     pkgPtr->count = 0;
     pkgPtr->uid = 0;
+    pkgPtr->hFtdi = hDll;
     Tcl_CreateEventSource(SetupProc, CheckProc, pkgPtr);
     Tcl_CreateObjCommand(interp, "ftd2xx", EnsembleCmd, pkgPtr, DeleteProc);
     return Tcl_PkgProvide(interp, "ftd2xx", PACKAGE_VERSION);
