@@ -29,6 +29,8 @@ typedef FT_STATUS (WINAPI FT_SetEventNotificationProc)(FT_HANDLE,DWORD,PVOID);
 typedef FT_STATUS (WINAPI FT_SetLatencyTimerProc)(FT_HANDLE,UCHAR);
 typedef FT_STATUS (WINAPI FT_SetTimeoutsProc)(FT_HANDLE,ULONG,ULONG);
 typedef FT_STATUS (WINAPI FT_WriteProc)(FT_HANDLE,LPVOID,DWORD,LPDWORD);
+typedef FT_STATUS (WINAPI FT_GetLibraryVersionProc)(LPDWORD);
+typedef FT_STATUS (WINAPI FT_RescanProc)(VOID);
 
 typedef struct FTDIPROCS {
     FT_CloseProc *FT_Close;
@@ -44,6 +46,8 @@ typedef struct FTDIPROCS {
     FT_SetLatencyTimerProc *FT_SetLatencyTimer;
     FT_SetTimeoutsProc *FT_SetTimeouts;
     FT_WriteProc *FT_Write;
+    FT_GetLibraryVersionProc *FT_GetLibraryVersion;
+    FT_RescanProc *FT_Rescan;
 } FTDIPROCS;
 
 static FTDIPROCS procs;
@@ -533,6 +537,7 @@ static const char *
 ConvertError(FT_STATUS fts)
 {
     const char *s;
+    static char other[80];
     switch (fts) {
 	case FT_OK: s = "no error"; break;
 	case FT_INVALID_HANDLE: s = "invalid handle"; break;
@@ -548,7 +553,11 @@ ConvertError(FT_STATUS fts)
 	/* some EEPROM errors skipped */
 	case FT_INVALID_ARGS: s = "invalid args"; break;
 	case FT_NOT_SUPPORTED: s = "not supported"; break;
-	default: s = "other error"; break;
+	case FT_DEVICE_LIST_NOT_READY: s = "device list not ready"; break;
+	default:
+	    sprintf(other, "unrecognised error 0x%08x", (ULONG)fts);
+	    s = other;
+	    break;
     }
     return s;
 }
@@ -564,8 +573,10 @@ static int
 OpenCmd(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[])
 {
     Package *pkgPtr = clientData;
-    const char *name = NULL;
-    FT_HANDLE handle = 0;
+    Channel *instPtr;
+    char name[6+TCL_INTEGER_SPACE];
+    const char *devname = NULL;
+    FT_HANDLE handle = NULL;
     FT_STATUS fts = FT_OK;
     HANDLE hEvent = INVALID_HANDLE_VALUE;
     int r = TCL_OK, index, nameindex = 2, ftmode = FT_OPEN_BY_SERIAL_NUMBER;
@@ -593,50 +604,51 @@ OpenCmd(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *const objv
 	}
 	++nameindex;
     }
-    name = Tcl_GetString(objv[nameindex]);
+    devname = Tcl_GetString(objv[nameindex]);
 
-    fts = procs.FT_OpenEx((void *)name, ftmode, &handle);
-    if (fts == FT_OK)
-	fts = procs.FT_SetTimeouts(handle, rxtimeout, txtimeout);
-    if (fts == FT_OK) {
-	hEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
-        fts = procs.FT_SetEventNotification(handle, FT_EVENT_RXCHAR, hEvent);
-	if (fts != FT_OK)
-	    CloseHandle(hEvent);
+    if ((fts = procs.FT_OpenEx((void *)devname, ftmode, &handle)) != FT_OK) {
+        Tcl_AppendResult(interp, "failed open device \"",
+			 devname, "\": ", ConvertError(fts), NULL);
+        return TCL_ERROR;
     }
-    if (fts == FT_OK) {
-        Channel *instPtr;
-        char name[6+TCL_INTEGER_SPACE];
-
-        sprintf(name, "ftd2xx%ld", pkgPtr->uid++);
-        instPtr = (Channel *)ckalloc(sizeof(Channel));
-	instPtr->flags = 0;
-        instPtr->watchmask = 0;
-        instPtr->validmask = TCL_READABLE | TCL_WRITABLE;
-	instPtr->rxtimeout = rxtimeout;
-	instPtr->txtimeout = txtimeout;
-        instPtr->handle = handle;
-	instPtr->event = hEvent;
-        instPtr->channel = Tcl_CreateChannel(&Ftd2xxChannelType, name,
-					     instPtr, instPtr->validmask);
-	Tcl_SetChannelOption(interp, instPtr->channel, "-encoding", "binary");
-	Tcl_SetChannelOption(interp, instPtr->channel, "-translation", "binary");
-        Tcl_RegisterChannel(interp, instPtr->channel);
-
-	/* insert at head of channels list */
-	instPtr->pkgPtr = pkgPtr;
-	instPtr->nextPtr = pkgPtr->headPtr;
-	pkgPtr->headPtr = instPtr;
-	++pkgPtr->count;
-
-        Tcl_SetObjResult(interp, Tcl_NewStringObj(name, -1));
-        r = TCL_OK;
-    } else {
-        Tcl_AppendResult(interp, "failed create device channel: \"",
-			 name, "\": ", ConvertError(fts), NULL);
-        r = TCL_ERROR;
+    if ((fts = procs.FT_SetTimeouts(handle, rxtimeout, txtimeout)) != FT_OK) {
+	procs.FT_Close(handle);
+        Tcl_AppendResult(interp, "failed initialize timeouts: ",
+			 ConvertError(fts), NULL);
+        return TCL_ERROR;
     }
-    return r;
+    hEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
+    if ((fts = procs.FT_SetEventNotification(handle, FT_EVENT_RXCHAR, hEvent)) != FT_OK) {
+	CloseHandle(hEvent);
+	procs.FT_Close(handle);
+        Tcl_AppendResult(interp, "failed configure event notifications: ",
+			 ConvertError(fts), NULL);
+        return TCL_ERROR;
+    }
+
+    sprintf(name, "ftd2xx%ld", pkgPtr->uid++);
+    instPtr = (Channel *)ckalloc(sizeof(Channel));
+    instPtr->flags = 0;
+    instPtr->watchmask = 0;
+    instPtr->validmask = TCL_READABLE | TCL_WRITABLE;
+    instPtr->rxtimeout = rxtimeout;
+    instPtr->txtimeout = txtimeout;
+    instPtr->handle = handle;
+    instPtr->event = hEvent;
+    instPtr->channel = Tcl_CreateChannel(&Ftd2xxChannelType, name,
+					 instPtr, instPtr->validmask);
+    Tcl_SetChannelOption(interp, instPtr->channel, "-encoding", "binary");
+    Tcl_SetChannelOption(interp, instPtr->channel, "-translation", "binary");
+    Tcl_RegisterChannel(interp, instPtr->channel);
+    
+    /* insert at head of channels list */
+    instPtr->pkgPtr = pkgPtr;
+    instPtr->nextPtr = pkgPtr->headPtr;
+    pkgPtr->headPtr = instPtr;
+    ++pkgPtr->count;
+    
+    Tcl_SetObjResult(interp, Tcl_NewStringObj(name, -1));
+    return TCL_OK;
 }
 
 /**
@@ -767,7 +779,7 @@ ListCmd(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *const objv
 	Tcl_ListObjAppendElement(interp, devObj, Tcl_NewStringObj(typeName, -1));
 	Tcl_ListObjAppendElement(interp, devObj, Tcl_NewStringObj("handle", -1));
 	Tcl_ListObjAppendElement(interp, devObj,
-				 Tcl_NewLongObj((long)nodesPtr[node].ftHandle));
+				 Tcl_NewWideIntObj((Tcl_WideInt)nodesPtr[node].ftHandle));
 	Tcl_ListObjAppendElement(interp, devObj, Tcl_NewStringObj("opened", -1));
 	Tcl_ListObjAppendElement(interp, devObj,
 				 Tcl_NewBooleanObj(nodesPtr[node].Flags & 1));
@@ -775,6 +787,46 @@ ListCmd(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *const objv
     }
     ckfree((char*)nodesPtr);
     Tcl_SetObjResult(interp, listObj);
+    return TCL_OK;
+}
+
+static int
+VersionCmd(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[])
+{
+    FT_STATUS fts;
+    DWORD dwVersion = 0;
+
+    if (objc != 2) {
+	Tcl_WrongNumArgs(interp, 2, objv, "");
+	return TCL_ERROR;
+    }
+    
+    if ((fts = procs.FT_GetLibraryVersion(&dwVersion)) != FT_OK) {
+	Tcl_AppendResult(interp, "failed to get version: ",
+			 ConvertError(fts), NULL);
+	return TCL_ERROR;
+    }
+
+    Tcl_SetObjResult(interp, Tcl_NewWideIntObj((Tcl_WideInt)dwVersion));
+    return TCL_OK;
+}
+
+static int
+RescanCmd(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[])
+{
+    FT_STATUS fts;
+
+    if (objc != 2) {
+	Tcl_WrongNumArgs(interp, 2, objv, "");
+	return TCL_ERROR;
+    }
+    
+    if ((fts = procs.FT_Rescan()) != FT_OK) {
+	Tcl_AppendResult(interp, "failed to rescan: ",
+			 ConvertError(fts), NULL);
+	return TCL_ERROR;
+    }
+
     return TCL_OK;
 }
 
@@ -788,7 +840,9 @@ static Ensemble Ftd2xxEnsemble[] = {
     { "open", OpenCmd, NULL },
     { "list", ListCmd, NULL },
     { "purge", PurgeCmd, NULL },
+    { "rescan", RescanCmd, NULL},
     { "reset", ResetCmd, NULL },
+    { "version", VersionCmd, NULL },
     { NULL, NULL, NULL }
 };
 
@@ -857,7 +911,9 @@ Ftd2xx_Init(Tcl_Interp *interp)
 	|| LOADPROC(FT_SetEventNotification)
 	|| LOADPROC(FT_SetLatencyTimer)
 	|| LOADPROC(FT_SetTimeouts)
-	|| LOADPROC(FT_Write) )
+	|| LOADPROC(FT_Write)
+	|| LOADPROC(FT_GetLibraryVersion)
+	|| LOADPROC(FT_Rescan) )
     {
 	Tcl_SetResult(interp, "invalid ftd2xx.dll library!", TCL_STATIC);
 	Tcl_SetErrorCode(interp, "DLL_INVALID", szDllName, NULL);
