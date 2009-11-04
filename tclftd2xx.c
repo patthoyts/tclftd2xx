@@ -280,12 +280,13 @@ ChannelSetOption(ClientData instance, Tcl_Interp *interp,
 	if (r == TCL_OK) {
 	    fts = procs.FT_SetLatencyTimer(instPtr->handle, (UCHAR)tmp);
 	}
-    } else if (!strcmp("-mode", optionName)) {
+    } else if (!strcmp("-bitmode", optionName)) {
+	int tmp = 1;
 	r = Tcl_GetInt(interp, newValue, &tmp);
 	if (r == TCL_OK) {
 	    fts = procs.FT_SetBitmode(instPtr->handle, (UCHAR)(tmp >> 8), (UCHAR)(tmp & 0xff));
 	}
-	}
+    }
 
     if (fts != FT_OK) {
 	Tcl_AppendResult(interp, "error setting ", optionName,
@@ -307,7 +308,7 @@ ChannelGetOption(ClientData instance, Tcl_Interp *interp,
 		 const char *optionName, Tcl_DString *optionValue)
 {
     Channel *instPtr = instance;
-    const char *options[] = {"readtimeout", "writetimeout", "latency", NULL};
+    const char *options[] = {"readtimeout", "writetimeout", "latency", "bitmode", NULL};
     int r = TCL_OK;
 
     if (optionName == NULL) {
@@ -348,11 +349,11 @@ ChannelGetOption(ClientData instance, Tcl_Interp *interp,
 				 ConvertError(fts), NULL);
 		r = TCL_ERROR;
 	    }
-	} else if (!strcmp("-mode", optionName)) {
+	} else if (!strcmp("-bitmode", optionName)) {
 	    UCHAR bmode = 0;
-	    Tcl_DStringSetLength(&ds, TCL_INTEGER_SPACE);
 	    fts = procs.FT_GetBitmode(instPtr->handle, &bmode);
 	    if (fts == FT_OK) {
+		Tcl_DStringSetLength(&ds, TCL_INTEGER_SPACE);
 		sprintf(Tcl_DStringValue(&ds), "%d", bmode);
 	    } else {
 		Tcl_AppendResult(interp, "failed to read ", optionName, ": ",
