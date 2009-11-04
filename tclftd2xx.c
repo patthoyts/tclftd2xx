@@ -20,6 +20,7 @@ typedef FT_STATUS (WINAPI FT_CreateDeviceInfoListProc)(LPDWORD);
 typedef FT_STATUS (WINAPI FT_GetDeviceInfoListProc)
     (FT_DEVICE_LIST_INFO_NODE*,LPDWORD);
 typedef FT_STATUS (WINAPI FT_GetLatencyTimerProc)(FT_HANDLE,PUCHAR);
+typedef FT_STATUS (WINAPI FT_GetBitmodeProc)(FT_HANDLE,PUCHAR);
 typedef FT_STATUS (WINAPI FT_GetStatusProc)(FT_HANDLE,LPDWORD,LPDWORD,LPDWORD);
 typedef FT_STATUS (WINAPI FT_OpenExProc)(PVOID,DWORD,FT_HANDLE*);
 typedef FT_STATUS (WINAPI FT_PurgeProc)(FT_HANDLE,ULONG);
@@ -27,6 +28,7 @@ typedef FT_STATUS (WINAPI FT_ReadProc)(FT_HANDLE,LPVOID,DWORD,LPDWORD);
 typedef FT_STATUS (WINAPI FT_ResetPortProc)(FT_HANDLE);
 typedef FT_STATUS (WINAPI FT_SetEventNotificationProc)(FT_HANDLE,DWORD,PVOID);
 typedef FT_STATUS (WINAPI FT_SetLatencyTimerProc)(FT_HANDLE,UCHAR);
+typedef FT_STATUS (WINAPI FT_SetBitmodeProc)(FT_HANDLE,UCHAR,UCHAR);
 typedef FT_STATUS (WINAPI FT_SetTimeoutsProc)(FT_HANDLE,ULONG,ULONG);
 typedef FT_STATUS (WINAPI FT_WriteProc)(FT_HANDLE,LPVOID,DWORD,LPDWORD);
 typedef FT_STATUS (WINAPI FT_GetLibraryVersionProc)(LPDWORD);
@@ -37,6 +39,7 @@ typedef struct FTDIPROCS {
     FT_CreateDeviceInfoListProc *FT_CreateDeviceInfoList;
     FT_GetDeviceInfoListProc *FT_GetDeviceInfoList;
     FT_GetLatencyTimerProc *FT_GetLatencyTimer;
+    FT_GetBitmodeProc *FT_GetBitmode;
     FT_GetStatusProc *FT_GetStatus;
     FT_OpenExProc *FT_OpenEx;
     FT_PurgeProc *FT_Purge;
@@ -44,6 +47,7 @@ typedef struct FTDIPROCS {
     FT_ResetPortProc *FT_ResetPort;
     FT_SetEventNotificationProc *FT_SetEventNotification;
     FT_SetLatencyTimerProc *FT_SetLatencyTimer;
+    FT_SetBitmodeProc *FT_SetBitmode;
     FT_SetTimeoutsProc *FT_SetTimeouts;
     FT_WriteProc *FT_Write;
     FT_GetLibraryVersionProc *FT_GetLibraryVersion;
@@ -276,7 +280,12 @@ ChannelSetOption(ClientData instance, Tcl_Interp *interp,
 	if (r == TCL_OK) {
 	    fts = procs.FT_SetLatencyTimer(instPtr->handle, (UCHAR)tmp);
 	}
-    }
+    } else if (!strcmp("-mode", optionName)) {
+	r = Tcl_GetInt(interp, newValue, &tmp);
+	if (r == TCL_OK) {
+	    fts = procs.FT_SetBitmode(instPtr->handle, (UCHAR)(tmp >> 8), (UCHAR)(tmp & 0xff));
+	}
+	}
 
     if (fts != FT_OK) {
 	Tcl_AppendResult(interp, "error setting ", optionName,
@@ -334,6 +343,17 @@ ChannelGetOption(ClientData instance, Tcl_Interp *interp,
 	    fts = procs.FT_GetLatencyTimer(instPtr->handle, &timer);
 	    if (fts == FT_OK) {
 		sprintf(Tcl_DStringValue(&ds), "%d", timer);
+	    } else {
+		Tcl_AppendResult(interp, "failed to read ", optionName, ": ",
+				 ConvertError(fts), NULL);
+		r = TCL_ERROR;
+	    }
+	} else if (!strcmp("-mode", optionName)) {
+	    UCHAR bmode = 0;
+	    Tcl_DStringSetLength(&ds, TCL_INTEGER_SPACE);
+	    fts = procs.FT_GetBitmode(instPtr->handle, &bmode);
+	    if (fts == FT_OK) {
+		sprintf(Tcl_DStringValue(&ds), "%d", bmode);
 	    } else {
 		Tcl_AppendResult(interp, "failed to read ", optionName, ": ",
 				 ConvertError(fts), NULL);
