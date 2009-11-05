@@ -19,6 +19,10 @@
 #include <errno.h>
 #include "ftd2xx.h"
 
+#if 10 * TCL_MAJOR_VERSION + TCL_MINOR_VERSION < 84
+#error This package requires at least Tcl 8.4
+#endif
+
 typedef FT_STATUS (WINAPI FT_CloseProc)(FT_HANDLE);
 typedef FT_STATUS (WINAPI FT_CreateDeviceInfoListProc)(LPDWORD);
 typedef FT_STATUS (WINAPI FT_GetDeviceInfoListProc)
@@ -1001,6 +1005,7 @@ static int
 VersionCmd(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *const objv[])
 {
     FT_STATUS fts;
+    char s[TCL_INTEGER_SPACE * 3 + 4];
     DWORD dwVersion = 0;
 
     if (objc != 2) {
@@ -1014,7 +1019,11 @@ VersionCmd(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *const o
 	return TCL_ERROR;
     }
 
-    Tcl_SetObjResult(interp, Tcl_NewWideIntObj((Tcl_WideInt)dwVersion));
+    sprintf(s, "%d.%d.%d",
+	    (dwVersion >> 16) & 0xff,
+	    (dwVersion >> 8) & 0xff,
+	    (dwVersion & 0xff));
+    Tcl_SetObjResult(interp, Tcl_NewStringObj(s, -1));
     return TCL_OK;
 }
 
@@ -1090,11 +1099,12 @@ Ftd2xx_Init(Tcl_Interp *interp)
     LPCSTR szDllName = "FTD2XX.dll";
 #endif
 
-#ifdef USE_TCL_STUBS
-    if (Tcl_InitStubs(interp, TCL_VERSION, 0) == NULL) {
+    if (Tcl_InitStubs(interp, "8.4", 0) == NULL) {
         return TCL_ERROR;
     }
-#endif
+    if (Tcl_PkgRequire(interp, "Tcl", "8.4", 0) == NULL) {
+	return TCL_ERROR;
+    }
 
     hDll = LoadLibraryA(szDllName);
     if (hDll == NULL) {
