@@ -294,30 +294,29 @@ ChannelSetOption(ClientData instance, Tcl_Interp *interp,
 	    fts = procs.FT_SetLatencyTimer(instPtr->handle, (UCHAR)tmp);
 	}
     } else if (!strcmp("-mode", optionName)) {
-	int baudrate, databits, stopbits;
-	char parity;
-	int args;
+	int baudrate = 19200, databits = 8, stop = 1;
+	char parity = 'n';
+	unsigned char wordlen = FT_BITS_8, stopbits = FT_STOP_BITS_1;
 
-	if ((args = sscanf(newValue, "%d,%c,%d,%d", &baudrate, &parity, &databits, &stopbits)) != 4) {
-	    Tcl_AppendResult(interp, "error setting mode: ", NULL);
-	    return TCL_ERROR;
-	}
+	sscanf(newValue, "%d,%c,%d,%d", &baudrate, &parity, &databits, &stop);
 
 	switch (databits) {
-	    case 8: databits = FT_BITS_8; break;
-	    case 7: databits = FT_BITS_7; break;
-	    case 6: databits = FT_BITS_6; break;
-	    case 5: databits = FT_BITS_5; break;
+	    case 8: wordlen = FT_BITS_8; break;
+	    case 7: wordlen = FT_BITS_7; break;
+	    case 6: wordlen = FT_BITS_6; break;
+	    case 5: wordlen = FT_BITS_5; break;
 	    default:
-		Tcl_AppendResult(interp, "error setting mode: databit count not supported", NULL);
+		Tcl_AppendResult(interp, "bad data value \"", newValue, 
+		    "\": must be 5, 6, 7 or 8.", NULL);
 		return TCL_ERROR;
 	}
 
-	switch (stopbits) {
+	switch (stop) {
 	    case 1: stopbits = FT_STOP_BITS_1; break;
 	    case 2: stopbits = FT_STOP_BITS_2; break;
 	    default:
-		Tcl_AppendResult(interp, "error setting mode: stopbit count not supported", NULL);
+		Tcl_AppendResult(interp, "bad stop value \"", newValue,
+		    "\"must be either 1 or 2.", NULL);
 		return TCL_ERROR;
 	}
 
@@ -328,26 +327,25 @@ ChannelSetOption(ClientData instance, Tcl_Interp *interp,
 	    case 'm': parity = FT_PARITY_MARK; break;
 	    case 's': parity = FT_PARITY_SPACE; break;
 	    default:
-		Tcl_AppendResult(interp, "error setting mode: parity not supported", NULL);
+		Tcl_AppendResult(interp, "bad parity value \"", newValue,
+		    "\": must be one of n, o, e, m, or s.", NULL);
 		return TCL_ERROR;
 	}
 
-	if ((fts = procs.FT_SetBaudRate(instPtr->handle, baudrate)) != FT_OK) {
+	fts = procs.FT_SetBaudRate(instPtr->handle, baudrate);
+	if (fts != FT_OK) {
 	    Tcl_AppendResult(interp, "failed set baudrate: \"",
 			     ConvertError(fts), NULL);
 	    return TCL_ERROR;
 	}
 
-	if ((fts = procs.FT_SetDataCharacteristics(instPtr->handle, databits, stopbits, parity)) != FT_OK) {
-	    Tcl_AppendResult(interp, "failed set data characteristics: \"",
-			     ConvertError(fts), NULL);
-	    return TCL_ERROR;
+	fts = procs.FT_SetDataCharacteristics(instPtr->handle, wordlen, stopbits, parity);
+	if (fts == FT_OK) {
+	    instPtr->baudrate = baudrate;
+	    instPtr->databits = wordlen;
+	    instPtr->stopbits = stopbits;
+	    instPtr->parity = parity;
 	}
-
-	instPtr->baudrate = baudrate;
-	instPtr->databits = databits;
-	instPtr->stopbits = stopbits;
-	instPtr->parity = parity;
     } else if (!strcmp("-handshake", optionName)) {
 	unsigned short handshake = 0xFFFF;
 	if (!strcmp(newValue,"none")) {
@@ -359,20 +357,45 @@ ChannelSetOption(ClientData instance, Tcl_Interp *interp,
 	} else if (!strcmp(newValue,"xonxoff")) {
 	    handshake = FT_FLOW_XON_XOFF;
 	} else {
-	    Tcl_AppendResult(interp, "error setting handshake: handshake not supported", NULL);
+	    Tcl_AppendResult(interp, "bad value \"", newValue, "\" for ", optionName,
+		": must be one of none, rtscts, dtrdsr or xonxoff", NULL);
 	    return TCL_ERROR;
 	}
-	if ((fts = procs.FT_SetFlowControl(instPtr->handle, handshake, instPtr->xonchar, instPtr->xoffchar)) == FT_OK)
+	fts = procs.FT_SetFlowControl(instPtr->handle, handshake, instPtr->xonchar, instPtr->xoffchar);
+	if (fts == FT_OK) {
 	    instPtr->handshake = handshake;
+	}
     } else if (!strcmp("-xchar", optionName)) {
-	if (strlen(newValue) != 3) {
-	    Tcl_AppendResult(interp, "error setting xon/xoff characters: values < 1 and > 127 not supported", NULL);
+	int xrgc, n;
+	char xonxoff[2];
+	const char **xrgv;
+	if (Tcl_SplitList(interp, newValue, &xrgc, &xrgv) != TCL_OK) {
 	    return TCL_ERROR;
+	}
+	if (xrgc != 2) {
+	badxchar:
+	    Tcl_AppendResult(interp, "bad value for -xchar: must be a list of two elements", NULL);
+	    return TCL_ERROR;
+	}
+	for (n = 0; n < 2; ++n) {
+	    /* check for extended utf-8 and handle like tcl serial channel */
+	    if (xrgv[n][0] & 0x80) {
+		Tcl_UniChar c;
+		int len;
+		len = Tcl_UtfToUniChar(xrgv[n], &c);
+		if (xrgv[n][len]) {
+		    goto badxchar;
+		}
+		xonxoff[n] = (char)c;
+	    } else {
+		xonxoff[n] = xrgv[n][0];
+	    }
 	}
 
-	if ((fts = procs.FT_SetFlowControl(instPtr->handle, FT_FLOW_NONE, newValue[0], newValue[2])) == FT_OK) {
-	    instPtr->xonchar = newValue[0];
-	    instPtr->xoffchar = newValue[2];
+	fts = procs.FT_SetFlowControl(instPtr->handle, instPtr->handshake, xonxoff[0], xonxoff[1]);
+	if (fts == FT_OK) {
+	    instPtr->xonchar = xonxoff[0];
+	    instPtr->xoffchar = xonxoff[1];
 	}
     }
 
@@ -448,7 +471,7 @@ ChannelGetOption(ClientData instance, Tcl_Interp *interp,
 		case FT_PARITY_SPACE: parity = 's'; break;
 		default:              parity = '?';
 	    }
-	    Tcl_DStringSetLength(&ds, 64);
+	    Tcl_DStringSetLength(&ds, TCL_INTEGER_SPACE * 3 + 6);
 	    sprintf(Tcl_DStringValue(&ds), "%d,%c,%d,%d",
 		    instPtr->baudrate, parity, instPtr->databits,
 		    (instPtr->stopbits == FT_STOP_BITS_1) ? 1 : 2);

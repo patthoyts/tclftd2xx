@@ -175,11 +175,15 @@ DLLOBJS = \
 !endif
 
 # We need the location of the FTDI header and library files.
-FTDI_INCLUDES =-ID2XX\WHQL
+!ifndef FTDI_DIR
+FTDI_DIR      =D2XX\WHQL
+!endif
+
+FTDI_INCLUDES =-I$(FTDI_DIR)
 !if "$(MACHINE)" == "AMD64"
-FTDI_LIBS     =-libpath:D2XX\WHQL\amd64
+FTDI_LIBS     =-libpath:$(FTDI_DIR)\amd64
 !else
-FTDI_LIBS     =-libpath:D2XX\WHQL\i386
+FTDI_LIBS     =-libpath:$(FTDI_DIR)\i386
 !endif
 
 #-------------------------------------------------------------------------
