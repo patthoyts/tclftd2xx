@@ -2,6 +2,7 @@
  *
  *   Copyright (C) 2008 Pat Thoyts <patthoyts@users.sourceforge.net>
  *   Copyright (C) 2008 Leopold Gerlinger
+ *   Copyright (C) 2009 Lars Unger
  *
  *	FTDI D2XX USB Device driver Tcl interface.
  *
@@ -23,6 +24,7 @@ typedef FT_STATUS (WINAPI FT_CreateDeviceInfoListProc)(LPDWORD);
 typedef FT_STATUS (WINAPI FT_GetDeviceInfoListProc)
     (FT_DEVICE_LIST_INFO_NODE*,LPDWORD);
 typedef FT_STATUS (WINAPI FT_GetLatencyTimerProc)(FT_HANDLE,PUCHAR);
+typedef FT_STATUS (WINAPI FT_GetBitModeProc)(FT_HANDLE,PUCHAR);
 typedef FT_STATUS (WINAPI FT_GetStatusProc)(FT_HANDLE,LPDWORD,LPDWORD,LPDWORD);
 typedef FT_STATUS (WINAPI FT_OpenExProc)(PVOID,DWORD,FT_HANDLE*);
 typedef FT_STATUS (WINAPI FT_PurgeProc)(FT_HANDLE,ULONG);
@@ -30,6 +32,7 @@ typedef FT_STATUS (WINAPI FT_ReadProc)(FT_HANDLE,LPVOID,DWORD,LPDWORD);
 typedef FT_STATUS (WINAPI FT_ResetPortProc)(FT_HANDLE);
 typedef FT_STATUS (WINAPI FT_SetEventNotificationProc)(FT_HANDLE,DWORD,PVOID);
 typedef FT_STATUS (WINAPI FT_SetLatencyTimerProc)(FT_HANDLE,UCHAR);
+typedef FT_STATUS (WINAPI FT_SetBitModeProc)(FT_HANDLE,UCHAR,UCHAR);
 typedef FT_STATUS (WINAPI FT_SetTimeoutsProc)(FT_HANDLE,ULONG,ULONG);
 typedef FT_STATUS (WINAPI FT_WriteProc)(FT_HANDLE,LPVOID,DWORD,LPDWORD);
 typedef FT_STATUS (WINAPI FT_GetLibraryVersionProc)(LPDWORD);
@@ -44,6 +47,7 @@ typedef struct FTDIPROCS {
     FT_CreateDeviceInfoListProc *FT_CreateDeviceInfoList;
     FT_GetDeviceInfoListProc *FT_GetDeviceInfoList;
     FT_GetLatencyTimerProc *FT_GetLatencyTimer;
+    FT_GetBitModeProc *FT_GetBitMode;
     FT_GetStatusProc *FT_GetStatus;
     FT_OpenExProc *FT_OpenEx;
     FT_PurgeProc *FT_Purge;
@@ -51,6 +55,7 @@ typedef struct FTDIPROCS {
     FT_ResetPortProc *FT_ResetPort;
     FT_SetEventNotificationProc *FT_SetEventNotification;
     FT_SetLatencyTimerProc *FT_SetLatencyTimer;
+    FT_SetBitModeProc *FT_SetBitMode;
     FT_SetTimeoutsProc *FT_SetTimeouts;
     FT_WriteProc *FT_Write;
     FT_GetLibraryVersionProc *FT_GetLibraryVersion;
@@ -293,6 +298,12 @@ ChannelSetOption(ClientData instance, Tcl_Interp *interp,
 	if (r == TCL_OK) {
 	    fts = procs.FT_SetLatencyTimer(instPtr->handle, (UCHAR)tmp);
 	}
+    } else if (!strcmp("-bitmode", optionName)) {
+	int tmp = 1;
+	r = Tcl_GetInt(interp, newValue, &tmp);
+	if (r == TCL_OK) {
+	    fts = procs.FT_SetBitMode(instPtr->handle, (UCHAR)(tmp >> 8), (UCHAR)(tmp & 0xff));
+	}
     } else if (!strcmp("-mode", optionName)) {
 	int baudrate = 19200, databits = 8, stop = 1;
 	char parity = 'n';
@@ -420,7 +431,7 @@ ChannelGetOption(ClientData instance, Tcl_Interp *interp,
 {
     Channel *instPtr = instance;
     const char *options[] = {"readtimeout", "writetimeout", "latency",
-			     "mode", "handshake", "xchar", NULL};
+			     "bitmode", "mode", "handshake", "xchar", NULL};
     int r = TCL_OK;
 
     if (optionName == NULL) {
@@ -456,6 +467,17 @@ ChannelGetOption(ClientData instance, Tcl_Interp *interp,
 	    fts = procs.FT_GetLatencyTimer(instPtr->handle, &timer);
 	    if (fts == FT_OK) {
 		sprintf(Tcl_DStringValue(&ds), "%d", timer);
+	    } else {
+		Tcl_AppendResult(interp, "failed to read ", optionName, ": ",
+				 ConvertError(fts), NULL);
+		r = TCL_ERROR;
+	    }
+	} else if (!strcmp("-bitmode", optionName)) {
+	    UCHAR bmode = 0;
+	    fts = procs.FT_GetBitMode(instPtr->handle, &bmode);
+	    if (fts == FT_OK) {
+		Tcl_DStringSetLength(&ds, TCL_INTEGER_SPACE);
+		sprintf(Tcl_DStringValue(&ds), "%d", bmode);
 	    } else {
 		Tcl_AppendResult(interp, "failed to read ", optionName, ": ",
 				 ConvertError(fts), NULL);
@@ -1088,6 +1110,7 @@ Ftd2xx_Init(Tcl_Interp *interp)
 	|| LOADPROC(FT_CreateDeviceInfoList)
 	|| LOADPROC(FT_GetDeviceInfoList)
 	|| LOADPROC(FT_GetLatencyTimer)
+	|| LOADPROC(FT_GetBitMode)
 	|| LOADPROC(FT_GetStatus)
 	|| LOADPROC(FT_OpenEx)
 	|| LOADPROC(FT_Purge)
@@ -1095,6 +1118,7 @@ Ftd2xx_Init(Tcl_Interp *interp)
 	|| LOADPROC(FT_ResetPort)
 	|| LOADPROC(FT_SetEventNotification)
 	|| LOADPROC(FT_SetLatencyTimer)
+	|| LOADPROC(FT_SetBitMode)
 	|| LOADPROC(FT_SetTimeouts)
 	|| LOADPROC(FT_Write)
 	|| LOADPROC(FT_GetLibraryVersion)
