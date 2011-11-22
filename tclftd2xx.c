@@ -184,9 +184,11 @@ ChannelClose(ClientData instance, Tcl_Interp *interp)
     }
     fts = procs.FT_Close(instPtr->handle);
     if (fts != FT_OK) {
-	Tcl_AppendResult(interp, "error closing \"",
-			 Tcl_GetChannelName(instPtr->channel), "\": ",
-			 ConvertError(fts), NULL);
+	if (interp != NULL) {
+	    Tcl_AppendResult(interp, "error closing \"",
+			     Tcl_GetChannelName(instPtr->channel), "\": ",
+			     ConvertError(fts), NULL);
+	}
 	r = TCL_ERROR;
     }
     /* remove this channel from the package list */
@@ -318,11 +320,20 @@ ChannelSetOption(ClientData instance, Tcl_Interp *interp,
 	switch (databits) {
 	    case 8: wordlen = FT_BITS_8; break;
 	    case 7: wordlen = FT_BITS_7; break;
+		/* The following are missing from newer versions of ftd2xx.h */
+#ifdef FT_BITS_5
 	    case 6: wordlen = FT_BITS_6; break;
 	    case 5: wordlen = FT_BITS_5; break;
+#endif
 	    default:
-		Tcl_AppendResult(interp, "bad data value \"", newValue, 
-		    "\": must be 5, 6, 7 or 8.", NULL);
+		if (interp != NULL) {
+		    Tcl_AppendResult(interp, "bad data value \"", newValue,
+				     "\": must be "
+#ifdef FT_BITS_5
+				     "5, 6, "
+#endif
+				     "7 or 8.", NULL);
+		}
 		return TCL_ERROR;
 	}
 
@@ -330,8 +341,10 @@ ChannelSetOption(ClientData instance, Tcl_Interp *interp,
 	    case 1: stopbits = FT_STOP_BITS_1; break;
 	    case 2: stopbits = FT_STOP_BITS_2; break;
 	    default:
-		Tcl_AppendResult(interp, "bad stop value \"", newValue,
-		    "\"must be either 1 or 2.", NULL);
+		if (interp != NULL) {
+		    Tcl_AppendResult(interp, "bad stop value \"", newValue,
+				     "\"must be either 1 or 2.", NULL);
+		}
 		return TCL_ERROR;
 	}
 
@@ -342,15 +355,19 @@ ChannelSetOption(ClientData instance, Tcl_Interp *interp,
 	    case 'm': parity = FT_PARITY_MARK; break;
 	    case 's': parity = FT_PARITY_SPACE; break;
 	    default:
-		Tcl_AppendResult(interp, "bad parity value \"", newValue,
-		    "\": must be one of n, o, e, m, or s.", NULL);
+		if (interp != NULL) {
+		    Tcl_AppendResult(interp, "bad parity value \"", newValue,
+				     "\": must be one of n, o, e, m, or s.", NULL);
+		}
 		return TCL_ERROR;
 	}
 
 	fts = procs.FT_SetBaudRate(instPtr->handle, baudrate);
 	if (fts != FT_OK) {
-	    Tcl_AppendResult(interp, "failed set baudrate: \"",
-			     ConvertError(fts), NULL);
+	    if (interp != NULL) {
+		Tcl_AppendResult(interp, "failed set baudrate: \"",
+				 ConvertError(fts), NULL);
+	    }
 	    return TCL_ERROR;
 	}
 
@@ -372,8 +389,10 @@ ChannelSetOption(ClientData instance, Tcl_Interp *interp,
 	} else if (!strcmp(newValue,"xonxoff")) {
 	    handshake = FT_FLOW_XON_XOFF;
 	} else {
-	    Tcl_AppendResult(interp, "bad value \"", newValue, "\" for ", optionName,
-		": must be one of none, rtscts, dtrdsr or xonxoff", NULL);
+	    if (interp != NULL) {
+		Tcl_AppendResult(interp, "bad value \"", newValue, "\" for ", optionName,
+				 ": must be one of none, rtscts, dtrdsr or xonxoff", NULL);
+	    }
 	    return TCL_ERROR;
 	}
 	fts = procs.FT_SetFlowControl(instPtr->handle, handshake, instPtr->xonchar, instPtr->xoffchar);
@@ -389,7 +408,9 @@ ChannelSetOption(ClientData instance, Tcl_Interp *interp,
 	}
 	if (xrgc != 2) {
 	badxchar:
-	    Tcl_AppendResult(interp, "bad value for -xchar: must be a list of two elements", NULL);
+	    if (interp != NULL) {
+		Tcl_AppendResult(interp, "bad value for -xchar: must be a list of two elements", NULL);
+	    }
 	    return TCL_ERROR;
 	}
 	for (n = 0; n < 2; ++n) {
@@ -415,8 +436,10 @@ ChannelSetOption(ClientData instance, Tcl_Interp *interp,
     }
 
     if (fts != FT_OK) {
-	Tcl_AppendResult(interp, "error setting ", optionName,
-			 ": ", ConvertError(fts), NULL);
+	if (interp != NULL) {
+	    Tcl_AppendResult(interp, "error setting ", optionName,
+			     ": ", ConvertError(fts), NULL);
+	}
 	r = TCL_ERROR;
     }
 
@@ -472,8 +495,10 @@ ChannelGetOption(ClientData instance, Tcl_Interp *interp,
 	    if (fts == FT_OK) {
 		sprintf(Tcl_DStringValue(&ds), "%d", timer);
 	    } else {
-		Tcl_AppendResult(interp, "failed to read ", optionName, ": ",
-				 ConvertError(fts), NULL);
+		if (interp != NULL) {
+		    Tcl_AppendResult(interp, "failed to read ", optionName, ": ",
+				     ConvertError(fts), NULL);
+		}
 		r = TCL_ERROR;
 	    }
 	} else if (!strcmp("-bitmode", optionName)) {
@@ -483,8 +508,10 @@ ChannelGetOption(ClientData instance, Tcl_Interp *interp,
 		Tcl_DStringSetLength(&ds, TCL_INTEGER_SPACE);
 		sprintf(Tcl_DStringValue(&ds), "%d", bmode);
 	    } else {
-		Tcl_AppendResult(interp, "failed to read ", optionName, ": ",
-				 ConvertError(fts), NULL);
+		if (interp != NULL) {
+		    Tcl_AppendResult(interp, "failed to read ", optionName, ": ",
+				     ConvertError(fts), NULL);
+		}
 		r = TCL_ERROR;
 	    }
 	} else if (!strcmp("-mode", optionName)) {
