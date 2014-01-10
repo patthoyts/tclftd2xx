@@ -3,6 +3,7 @@
  *   Copyright (C) 2008 Pat Thoyts <patthoyts@users.sourceforge.net>
  *   Copyright (C) 2008 Leopold Gerlinger
  *   Copyright (C) 2009 Lars Unger
+ *   Copyright (C) 2014 Alexander Galanin <al@galanin.nnov.ru>
  *
  *	FTDI D2XX USB Device driver Tcl interface.
  *
@@ -787,7 +788,8 @@ OpenCmd(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *const objv
     Package *pkgPtr = clientData;
     Channel *instPtr;
     char name[6+TCL_INTEGER_SPACE];
-    const char *devname = NULL;
+    void *devspec = NULL;
+    long devloc;
     FT_HANDLE handle = NULL;
     FT_STATUS fts = FT_OK;
     HANDLE hEvent = INVALID_HANDLE_VALUE;
@@ -816,11 +818,33 @@ OpenCmd(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *const objv
 	}
 	++nameindex;
     }
-    devname = Tcl_GetString(objv[nameindex]);
+    /*
+     * http://www.ftdichip.com/Support/Knowledgebase/ft_openex.htm
+     *
+     * The meaning of pvArg1 depends on dwFlags:
+     * if dwFlags is FT_OPEN_BY_SERIAL_NUMBER, pvArg1 is interpreted as a
+     * pointer to a null-terminated string that represents the serial number
+     * of the device;
+     * if dwFlags is FT_OPEN_BY_DESCRIPTION, pvArg1 is interpreted as a
+     * pointer to a null-terminated string that represents the device
+     * description;
+     * if dwFlags is FT_OPEN_BY_LOCATION, pvArg1 is interpreted as a long
+     * value that contains the location ID of the device.
+     */
+    if (ftmode == FT_OPEN_BY_LOCATION) {
+        if (Tcl_GetLongFromObj(interp, objv[nameindex], &devloc) == TCL_OK) {
+            devspec = (void *)devloc;
+        } else {
+            return TCL_ERROR;
+        }
+    } else {
+        devspec = Tcl_GetString(objv[nameindex]);
+    }
 
-    if ((fts = procs.FT_OpenEx((void *)devname, ftmode, &handle)) != FT_OK) {
+    if ((fts = procs.FT_OpenEx(devspec, ftmode, &handle)) != FT_OK) {
         Tcl_AppendResult(interp, "failed open device \"",
-			 devname, "\": ", ConvertError(fts), NULL);
+                Tcl_GetString(objv[nameindex]), "\": ", ConvertError(fts),
+                NULL);
         return TCL_ERROR;
     }
 
@@ -1191,4 +1215,3 @@ Ftd2xx_Init(Tcl_Interp *interp)
  *   tab-width: 8
  * End:
  */
-
