@@ -59,17 +59,16 @@ INSTALLATION
 
 The FTDI D2XX driver package should be downloaded from the website
 (http://www.ftdichip.com/Drivers/D2XX.htm). Set the FTDI_DIR variable
-when calling Makefile.vc to point to the driver directory that
+when calling CMake to point to the driver directory that
 contains the ftd2xx.h header.
 
-Using MSVC (6 to 9) do:
- nmake -f Makefile.vc TCLDIR=c:\Tcl FTDI_DIR=..\D2XX
- nmake -f Makefile.vc TCLDIR=c:\Tcl FTDI_DIR=..\D2XX install
+    cmake -S. -Bbuild -DFTDI_DIR=..\ftd2xx-2.12.28 .
+    cmake --build build --config Release
 
 If the ftd2xx.dll is not installed already, it should be manually
 copied to the installation folder (eg: c:\tcl\lib\tclftd2xx). It
 is usually installed into the system32 folder when the device driver
-is installed.
+is installed once you have plugged in a compatible device.
 
 You may have to install drivers for your device (ftdibus.sys or
 ftd2xx.sys). This should be provided by the device manufacturer as the
