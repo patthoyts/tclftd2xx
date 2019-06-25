@@ -1,6 +1,6 @@
-README                                                            -*- text -*-
+# README
 
-ftd2xx - a Tcl interface to the FTDI D2XX USB device library
+*ftd2xx* - a Tcl interface to the FTDI D2XX USB device library
 
 This package provides a Tcl interface to the Future Technology Devices
 International Ltd. D2XX driver library. This is a commonly used USB
@@ -24,41 +24,42 @@ been tested there is no intrinsic reason why this package should not
 be easily ported to operate on that platform.
 
 
-COMMANDS
+## COMMANDS
 
-ftd2xx open ?-serial? ?-description? ?-location? name
+### ftd2xx open ?-serial? ?-description? ?-location? name
 
   open the named device and create a channel for it. The driver
   supports naming devices using one of the serial number, a
   descriptive device name or on windows a location (port number).
-  See the 'ftd2xx list' command to obtain a list of attached devices
+  See the `ftd2xx list` command to obtain a list of attached devices
   with their names and locations.
 
-ftd2xx list
+### ftd2xx list
 
   list all the supported devices currently connected. Each list
   element is itself a name-value list providing all the information
   available on the device including the serial number, location,
   description, device id, device handle and status.
 
-ftd2xx reset channel
+### ftd2xx reset channel
 
   this command resets the device identified by the given channel.
   It is likely that after this call the channel will need to be
   closed and the device re-opened. (untested)
 
-ftd2xx purge channel
+### ftd2xx purge channel
 
   purge the device buffers for the device identified by the channel
 
-ftd2xx version
+### ftd2xx version
 
   return the FTDI library version (eg: 3.1.16)
 
-INSTALLATION
+
+## INSTALLATION
 
 The FTDI D2XX driver package should be downloaded from the website
-(http://www.ftdichip.com/Drivers/D2XX.htm). Set the FTDI_DIR variable
+(http://www.ftdichip.com/Drivers/D2XX.htm). Set the `FTDI_DIR` variable
 when calling CMake to point to the driver directory that
 contains the ftd2xx.h header.
 
@@ -66,7 +67,7 @@ contains the ftd2xx.h header.
     cmake --build build --config Release
 
 If the ftd2xx.dll is not installed already, it should be manually
-copied to the installation folder (eg: c:\tcl\lib\tclftd2xx). It
+copied to the installation folder (eg: `c:\tcl\lib\tclftd2xx`). It
 is usually installed into the system32 folder when the device driver
 is installed once you have plugged in a compatible device.
 
